@@ -75,7 +75,7 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
       the hills higher up are SSB. Simulated band: the real thing would take AetherSDR's TCI spectrum stream.<br>
       <b>On a Quest:</b> open this page in the Quest browser and press <b>Enter VR</b>. In VR the band sits on a
       table in front of you; walk round it. Point a controller at a signal and pull the <b>trigger</b> to tune. Thumbstick up/down = shrink or grow, left/right = turn.<br>
-      <b>AE screen:</b> open <a href="send.html" style="color:inherit">send.html</a> on the PC, share the AetherSDR window, then press <b>AE screen</b> here and enter its code. In VR, point at it and hold <b>grip</b> to move it.</div>
+      <b>AE screen:</b> open <a href="send.html" style="color:inherit">send.html</a> on the PC, share the AetherSDR window, then press <b>AE screen</b> here and enter its code. In VR, point at it and hold <b>grip</b> to move it; while holding, thumbstick up/down pulls it nearer or pushes it away, left/right resizes it.</div>
   </div>
 
   <footer>
@@ -346,7 +346,9 @@ function tuneTo(f) {
 // ── AE screen: the AetherSDR window streamed from send.html on the PC (WebRTC via PeerJS) ──
 const aeVideo = document.createElement('video');
 aeVideo.muted = true; aeVideo.playsInline = true; aeVideo.autoplay = true;
-const aeTex = new THREE.VideoTexture(aeVideo); aeTex.minFilter = THREE.LinearFilter; aeTex.generateMipmaps = false;
+const aeTex = new THREE.VideoTexture(aeVideo);
+aeTex.minFilter = THREE.LinearMipmapLinearFilter; aeTex.generateMipmaps = true;
+aeTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 const aeScreen = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: aeTex, side: THREE.DoubleSide, fog: false }));
 const aeFrame = new THREE.Mesh(new THREE.PlaneGeometry(1.03, 1.05), new THREE.MeshBasicMaterial({ color: '#1a2635', side: THREE.DoubleSide, fog: false }));
 aeFrame.position.z = -0.002; aeScreen.add(aeFrame);
@@ -355,8 +357,8 @@ let aeAspect = 16 / 9, aeGrabbedBy = null, aePeer = null;
 function placeAE() {
   if (aeGrabbedBy) return;
   if (renderer.xr.isPresenting) {                     // a 1.6 m screen off to your left, angled towards you
-    const w = 1.6; aeScreen.scale.set(w, w / aeAspect, 1);
-    aeScreen.position.set(-1.75, 1.45, -1.25); aeScreen.rotation.set(0, 0.8, 0);
+    const w = 1.5; aeScreen.scale.set(w, w / aeAspect, 1);
+    aeScreen.position.set(-0.85, 1.4, -0.95); aeScreen.rotation.set(0, 0.73, 0);
   } else {                                            // desktop: a big screen standing behind the band
     const w = 34, h = w / aeAspect; aeScreen.scale.set(w, h, 1);
     aeScreen.position.set(0, 2 + h / 2, -D / 2 - 3); aeScreen.rotation.set(0, 0, 0);
@@ -397,6 +399,7 @@ if (aeParam) { aeCode.value = aeParam; aeConnect(aeParam); }
 
 // ── WebXR ────────────────────────────────────────────────────────────────
 renderer.xr.enabled = true;
+renderer.xr.setFramebufferScaleFactor(1.3);
 renderer.xr.setReferenceSpaceType('local-floor');
 const floor = new THREE.GridHelper(12, 24, '#1f3247', '#122030'); floor.visible = false; scene.add(floor);
 const vrBtn = document.getElementById('vr');
@@ -432,6 +435,13 @@ function vrInput(dt) {
   for (const src of ses.inputSources) {
     const gp = src.gamepad; if (!gp || gp.axes.length < 4) continue;
     const x = gp.axes[2], y = gp.axes[3];
+    if (aeGrabbedBy) {
+      if (Math.abs(y) > 0.2) { const d = aeScreen.position.length();
+        if ((y < 0 && d < 6) || (y > 0 && d > 0.25)) aeScreen.position.multiplyScalar(1 - y * dt * 0.9); }  // stick forward = push away
+      if (Math.abs(x) > 0.2) { const k = 1 + x * dt * 0.8, wNow = aeScreen.scale.x * k;
+        if (wNow > 0.3 && wNow < 5) aeScreen.scale.multiplyScalar(k); }
+      continue;
+    }
     if (Math.abs(y) > 0.2) vrScale = Math.min(0.25, Math.max(0.015, vrScale * (1 - y * dt * 1.2)));
     if (Math.abs(x) > 0.2) vrTurn -= x * dt * 1.2;
   }

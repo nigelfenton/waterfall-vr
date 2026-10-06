@@ -29,6 +29,7 @@ h1{font:600 20px/1 var(--f-display);letter-spacing:.04em;margin:0;text-transform
 .stage{position:relative;flex:1;min-height:0}
 canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
 canvas:active{cursor:grabbing}
+.hint a{pointer-events:auto}
 .hint{position:absolute;left:16px;bottom:12px;max-width:min(560px,calc(100% - 32px));font-size:12px;color:var(--muted);
   background:rgba(5,8,13,.72);border:1px solid var(--rule);border-radius:4px;padding:8px 10px;pointer-events:none}
 .hint b{color:var(--ink)}
@@ -47,6 +48,8 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
 .spacer{flex:1}
 #vr{background:var(--live);color:#04140b;border-color:var(--live);font-weight:600}
 .xrdiag{flex-basis:100%;font:11px var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+#aeCode{font:600 14px var(--f-mono);color:var(--ink);background:#121c28;border:1px solid var(--rule);border-radius:4px;padding:5px 8px;width:4.5em}
+[hidden]{display:none !important}
 #vr:disabled{background:#121c28;color:var(--muted);border-color:var(--rule);cursor:not-allowed}
 @media (max-width:640px){ .hint{display:none} .legend{display:none} h1{font-size:17px} }
 </style>
@@ -71,7 +74,8 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
       at the front, history rolls away behind. Ridges are CW, the comb at 14.074 is FT8 on its 15 s cycle,
       the hills higher up are SSB. Simulated band: the real thing would take AetherSDR's TCI spectrum stream.<br>
       <b>On a Quest:</b> open this page in the Quest browser and press <b>Enter VR</b>. In VR the band sits on a
-      table in front of you; walk round it. Point a controller at a signal and pull the <b>trigger</b> to tune. Thumbstick up/down = shrink or grow, left/right = turn.</div>
+      table in front of you; walk round it. Point a controller at a signal and pull the <b>trigger</b> to tune. Thumbstick up/down = shrink or grow, left/right = turn.<br>
+      <b>AE screen:</b> open <a href="send.html" style="color:inherit">send.html</a> on the PC, share the AetherSDR window, then press <b>AE screen</b> here and enter its code. In VR, point at it and hold <b>grip</b> to move it.</div>
   </div>
 
   <footer>
@@ -93,11 +97,19 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
     <span class="spacer"></span>
     <button id="pause" aria-pressed="false">Pause</button>
     <button id="vr" disabled>Enter VR</button>
+    <button id="aeBtn" aria-expanded="false">AE screen</button>
+    <span class="group" id="aeForm" hidden>
+      <label class="lbl" for="aeCode">Code</label>
+      <input id="aeCode" inputmode="numeric" pattern="[0-9]*" maxlength="4" size="5" placeholder="1234" autocomplete="off">
+      <button id="aeGo">Connect</button>
+    </span>
     <div id="xrdiag" class="xrdiag">checking WebXR…</div>
+  <div id="aestat" class="xrdiag" hidden></div>
   </footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
 <script>
 (() => {
 // ── Band model ───────────────────────────────────────────────────────────
@@ -331,6 +343,58 @@ function tuneTo(f) {
   tag.position.set(xOf(f), HMAX * heightK * 1.15 + 2, D / 2); tag.visible = true;
 }
 
+// ── AE screen: the AetherSDR window streamed from send.html on the PC (WebRTC via PeerJS) ──
+const aeVideo = document.createElement('video');
+aeVideo.muted = true; aeVideo.playsInline = true; aeVideo.autoplay = true;
+const aeTex = new THREE.VideoTexture(aeVideo); aeTex.minFilter = THREE.LinearFilter; aeTex.generateMipmaps = false;
+const aeScreen = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: aeTex, side: THREE.DoubleSide, fog: false }));
+const aeFrame = new THREE.Mesh(new THREE.PlaneGeometry(1.03, 1.05), new THREE.MeshBasicMaterial({ color: '#1a2635', side: THREE.DoubleSide, fog: false }));
+aeFrame.position.z = -0.002; aeScreen.add(aeFrame);
+aeScreen.visible = false; scene.add(aeScreen);
+let aeAspect = 16 / 9, aeGrabbedBy = null, aePeer = null;
+function placeAE() {
+  if (aeGrabbedBy) return;
+  if (renderer.xr.isPresenting) {                     // a 1.6 m screen off to your left, angled towards you
+    const w = 1.6; aeScreen.scale.set(w, w / aeAspect, 1);
+    aeScreen.position.set(-1.75, 1.45, -1.25); aeScreen.rotation.set(0, 0.8, 0);
+  } else {                                            // desktop: a big screen standing behind the band
+    const w = 34, h = w / aeAspect; aeScreen.scale.set(w, h, 1);
+    aeScreen.position.set(0, 2 + h / 2, -D / 2 - 3); aeScreen.rotation.set(0, 0, 0);
+  }
+}
+const aeStat = msg => { const el = document.getElementById('aestat'); el.hidden = false; el.textContent = 'AE screen: ' + msg; };
+function aeShowFrame() {
+  if (!aeVideo.videoWidth) return;
+  aeAspect = aeVideo.videoWidth / aeVideo.videoHeight; placeAE(); aeScreen.visible = true;
+  aeStat('live ' + aeVideo.videoWidth + '×' + aeVideo.videoHeight);
+}
+aeVideo.addEventListener('loadedmetadata', aeShowFrame); aeVideo.addEventListener('resize', aeShowFrame);
+function aeConnect(code) {
+  if (!/^\d{4}$/.test(code)) { aeStat('the code is the 4 digits shown on send.html'); return; }
+  if (typeof Peer === 'undefined') { aeStat('PeerJS did not load'); return; }
+  if (aePeer) aePeer.destroy();
+  aeStat('connecting to ' + code + '…');
+  aePeer = new Peer();
+  aePeer.on('open', () => {
+    const conn = aePeer.connect('wfvr-g0jkn-' + code, { reliable: true });
+    conn.on('open', () => aeStat('connected to ' + code + ', waiting for the PC to share a window…'));
+    conn.on('close', () => { aeScreen.visible = false; aeStat('the PC closed send.html'); });
+  });
+  aePeer.on('call', call => {
+    call.answer();
+    call.on('stream', st => { aeVideo.srcObject = st; aeVideo.play().catch(() => {}); });
+    call.on('close', () => { aeScreen.visible = false; aeStat('the PC stopped sharing'); });
+  });
+  aePeer.on('error', e => aeStat(e.type === 'peer-unavailable' ? 'no sender with code ' + code + ' (is send.html open?)'
+    : 'PeerJS ' + e.type));
+}
+const aeBtn = document.getElementById('aeBtn'), aeForm = document.getElementById('aeForm'), aeCode = document.getElementById('aeCode');
+aeBtn.addEventListener('click', () => { aeForm.hidden = !aeForm.hidden; aeBtn.setAttribute('aria-expanded', String(!aeForm.hidden)); if (!aeForm.hidden) aeCode.focus(); });
+document.getElementById('aeGo').addEventListener('click', () => aeConnect(aeCode.value.trim()));
+aeCode.addEventListener('keydown', e => { if (e.key === 'Enter') aeConnect(aeCode.value.trim()); });
+const aeParam = new URLSearchParams(location.search).get('ae');
+if (aeParam) { aeCode.value = aeParam; aeConnect(aeParam); }
+
 // ── WebXR ────────────────────────────────────────────────────────────────
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
@@ -342,6 +406,13 @@ const lasers = [0, 1].map(i => {
     new THREE.LineBasicMaterial({ color: '#3fd18a', transparent: true, opacity: 0.8 }));
   beam.scale.z = 4; c.add(beam); c.visible = false; scene.add(c);
   c.addEventListener('select', () => { const f = aim(c); if (f !== null) tuneTo(f); });
+  c.addEventListener('squeezestart', () => {
+    if (!aeScreen.visible || aeGrabbedBy) return;
+    c.updateMatrixWorld(true);
+    ray.set(new THREE.Vector3().setFromMatrixPosition(c.matrixWorld), new THREE.Vector3(0, 0, -1).transformDirection(c.matrixWorld));
+    if (ray.intersectObject(aeScreen, false).length) { c.attach(aeScreen); aeGrabbedBy = c; }
+  });
+  c.addEventListener('squeezeend', () => { if (aeGrabbedBy === c) { scene.attach(aeScreen); aeGrabbedBy = null; } });
   return c;
 });
 const cpos = new THREE.Vector3(), cdir = new THREE.Vector3();
@@ -372,11 +443,12 @@ function vrInput(dt) {
 async function enterVR() {
   const ses = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
   await renderer.xr.setSession(ses);
-  scene.fog = null; floor.visible = true; placeWorldForVR(); lasers.forEach(c => c.visible = true);
+  scene.fog = null; floor.visible = true; placeWorldForVR(); lasers.forEach(c => c.visible = true); placeAE();
   vrBtn.textContent = 'Exit VR';
   ses.addEventListener('end', () => {
     world.scale.setScalar(1); world.rotation.y = 0; world.position.set(0, 0, 0);
     scene.fog = new THREE.Fog('#05080d', 55, 120); floor.visible = false; lasers.forEach(c => c.visible = false); showHover(null);
+    if (aeGrabbedBy) { scene.attach(aeScreen); aeGrabbedBy = null; } placeAE();
     vrBtn.textContent = 'Enter VR'; resize();
   });
 }

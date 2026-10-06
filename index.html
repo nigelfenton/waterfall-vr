@@ -57,6 +57,7 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
     <div class="read">
       <span>14.000–14.350 MHz</span><span>RBW <b>500 Hz</b></span><span id="utc">--:--:-- UTC</span>
       <span class="live" id="state">● simulated band</span>
+      <span>Tuned <b id="tuned">click a signal</b></span>
     </div>
   </header>
 
@@ -66,11 +67,11 @@ output{font:11px var(--f-mono);color:var(--muted);min-width:3.5em}
       <div class="ramp"></div>
       <div class="rampl"><span>floor</span><span>+20 dB</span><span>+45</span></div>
     </div>
-    <div class="hint"><b>Drag</b> to orbit, <b>scroll</b> or pinch to zoom. Frequency runs left to right, newest
+    <div class="hint"><b>Drag</b> to orbit, <b>scroll</b> or pinch to zoom, <b>click</b> a signal to tune it. Frequency runs left to right, newest
       at the front, history rolls away behind. Ridges are CW, the comb at 14.074 is FT8 on its 15 s cycle,
       the hills higher up are SSB. Simulated band: the real thing would take AetherSDR's TCI spectrum stream.<br>
       <b>On a Quest:</b> open this page in the Quest browser and press <b>Enter VR</b>. In VR the band sits on a
-      table in front of you; walk round it. Thumbstick up/down = shrink or grow it, left/right = turn it.</div>
+      table in front of you; walk round it. Point a controller at a signal and pull the <b>trigger</b> to tune. Thumbstick up/down = shrink or grow, left/right = turn.</div>
   </div>
 
   <footer>
@@ -234,7 +235,8 @@ function setView(id) {
 for (const id of ['vTerrain','vClassic','vValley','vFly']) document.getElementById(id).addEventListener('click', () => setView(id));
 
 const pointers = new Map(); let pinch0 = 0;
-canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); if (fly) setView('vTerrain'); });
+let downAt = null;
+canvas.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); if (fly) setView('vTerrain'); });
 canvas.addEventListener('pointermove', e => {
   if (!pointers.has(e.pointerId)) return;
   const [px, py] = pointers.get(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]);
@@ -247,14 +249,28 @@ canvas.addEventListener('pointermove', e => {
   }
 });
 const endPtr = e => { pointers.delete(e.pointerId); if (pointers.size < 2) pinch0 = 0; };
-canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr);
+canvas.addEventListener('pointerup', e => {
+  if (downAt && pointers.size === 1 && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) < 6) {
+    const r = canvas.getBoundingClientRect();
+    ray.setFromCamera({ x: (e.clientX - r.left) / r.width * 2 - 1, y: -((e.clientY - r.top) / r.height) * 2 + 1 }, camera);
+    const f = pick(ray.ray.origin, ray.ray.direction); if (f !== null) tuneTo(f);
+  }
+  downAt = null; endPtr(e);
+});
+canvas.addEventListener('pointermove', e => {          // hover curtain on desktop when no button is held
+  if (pointers.size || renderer.xr.isPresenting) return;
+  const r = canvas.getBoundingClientRect();
+  ray.setFromCamera({ x: (e.clientX - r.left) / r.width * 2 - 1, y: -((e.clientY - r.top) / r.height) * 2 + 1 }, camera);
+  showHover(pick(ray.ray.origin, ray.ray.direction, true));
+});
+canvas.addEventListener('pointerleave', () => showHover(null)); canvas.addEventListener('pointercancel', endPtr);
 canvas.addEventListener('wheel', e => { e.preventDefault(); goal.r = Math.min(140, Math.max(12, goal.r * (1 + e.deltaY * 0.001))); }, { passive: false });
 
 // ── Controls ─────────────────────────────────────────────────────────────
 let dirty = true;
 const hgt = document.getElementById('hgt'), spd = document.getElementById('spd');
 let heightK = +hgt.value, rowsPerSec = +spd.value, paused = false;
-hgt.addEventListener('input', () => { heightK = +hgt.value; dirty = true; document.getElementById('hgtO').textContent = heightK.toFixed(1) + '×'; });
+hgt.addEventListener('input', () => { heightK = +hgt.value; dirty = true; if (tunedF !== null) tuneTo(tunedF); document.getElementById('hgtO').textContent = heightK.toFixed(1) + '×'; });
 spd.addEventListener('input', () => { rowsPerSec = +spd.value; document.getElementById('spdO').textContent = rowsPerSec + '/s'; });
 const pauseBtn = document.getElementById('pause');
 pauseBtn.addEventListener('click', () => { paused = !paused; pauseBtn.setAttribute('aria-pressed', String(paused));
@@ -262,11 +278,78 @@ pauseBtn.addEventListener('click', () => { paused = !paused; pauseBtn.setAttribu
   document.getElementById('state').textContent = paused ? '❚❚ paused' : '● simulated band'; });
 if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { rowsPerSec = 4; spd.value = 4; document.getElementById('spdO').textContent = '4/s'; }
 
+// ── Point and tune ───────────────────────────────────────────────────────
+// A pick is a ray hitting the band's floor plane; the frequency is then snapped to the strongest
+// signal nearby in the recent rows, so a slightly-off aim still lands on the carrier.
+const ray = new THREE.Raycaster();
+const fOfX = x => F0 + (x / W + 0.5) * (F1 - F0);
+const modeOf = f => f < 14.070 ? 'CW' : f < 14.0735 ? 'Digital' : f < 14.078 ? 'FT8' : f < 14.0995 ? 'RTTY / data'
+  : f < 14.150 ? 'Data / CW' : 'SSB';
+const inv = new THREE.Matrix4(), o3 = new THREE.Vector3(), d3 = new THREE.Vector3();
+function pick(origin, dir, raw) {
+  world.updateMatrixWorld(true); inv.copy(world.matrixWorld).invert();
+  o3.copy(origin).applyMatrix4(inv); d3.copy(dir).transformDirection(inv);
+  if (d3.y > -1e-4) return null;
+  const t = -o3.y / d3.y, x = o3.x + d3.x * t, z = o3.z + d3.z * t;
+  if (Math.abs(x) > W / 2 || Math.abs(z) > D / 2) return null;
+  let b = Math.round((x / W + 0.5) * (BINS - 1));
+  if (!raw) {                                           // snap within ±3 kHz to the strongest recent peak
+    let best = -1, bestB = b;
+    for (let k = -6; k <= 6; k++) { const i = b + k; if (i < 0 || i >= BINS) continue;
+      for (let r = 0; r < 40; r++) { const v = data[r * BINS + i] - Math.abs(k) * 0.4; if (v > best) { best = v; bestB = i; } } }
+    if (best > 10) b = bestB;
+  }
+  return F0 + b / (BINS - 1) * (F1 - F0);
+}
+function curtain(color, opacity) {                      // a translucent slice through the band at one frequency
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(D, 1), new THREE.MeshBasicMaterial({ color, transparent: true,
+    opacity, side: THREE.DoubleSide, depthWrite: false }));
+  m.rotation.y = Math.PI / 2; m.visible = false; world.add(m); return m;
+}
+const hoverC = curtain('#ffffff', 0.10), tunedC = curtain('#ffb21f', 0.28);
+const tagCv = document.createElement('canvas'); tagCv.width = 512; tagCv.height = 128;
+const tagTex = new THREE.CanvasTexture(tagCv);
+const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tagTex, transparent: true, depthWrite: false, depthTest: false }));
+tag.scale.set(10, 2.5, 1); tag.visible = false; tag.renderOrder = 10; world.add(tag);
+function placeCurtain(m, f) {
+  const hh = HMAX * heightK * 1.15;
+  m.position.set(xOf(f), hh / 2, 0); m.scale.y = hh; m.visible = true;
+}
+let tunedF = null;
+function showHover(f) { if (f === null) hoverC.visible = false; else placeCurtain(hoverC, f); }
+function tuneTo(f) {
+  tunedF = f; placeCurtain(tunedC, f);
+  const txt = f.toFixed(4) + ' MHz', mode = modeOf(f);
+  document.getElementById('tuned').textContent = txt + ' · ' + mode;
+  const g = tagCv.getContext('2d'); g.clearRect(0, 0, 512, 128);
+  g.fillStyle = 'rgba(5,8,13,0.82)'; g.strokeStyle = '#ffb21f'; g.lineWidth = 4;
+  g.beginPath(); g.roundRect ? g.roundRect(6, 6, 500, 116, 14) : g.rect(6, 6, 500, 116); g.fill(); g.stroke();
+  g.fillStyle = '#ffb21f'; g.font = '600 52px "JetBrains Mono", Consolas, monospace'; g.textAlign = 'center';
+  g.fillText(txt, 256, 62); g.fillStyle = '#d9e4ef'; g.font = '500 32px "IBM Plex Sans", system-ui, sans-serif';
+  g.fillText(mode + ' · simulated', 256, 104);
+  tagTex.needsUpdate = true;
+  tag.position.set(xOf(f), HMAX * heightK * 1.15 + 2, D / 2); tag.visible = true;
+}
+
 // ── WebXR ────────────────────────────────────────────────────────────────
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
 const floor = new THREE.GridHelper(12, 24, '#1f3247', '#122030'); floor.visible = false; scene.add(floor);
 const vrBtn = document.getElementById('vr');
+const lasers = [0, 1].map(i => {
+  const c = renderer.xr.getController(i);
+  const beam = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: '#3fd18a', transparent: true, opacity: 0.8 }));
+  beam.scale.z = 4; c.add(beam); c.visible = false; scene.add(c);
+  c.addEventListener('select', () => { const f = aim(c); if (f !== null) tuneTo(f); });
+  return c;
+});
+const cpos = new THREE.Vector3(), cdir = new THREE.Vector3();
+function aim(c, raw) {
+  c.updateMatrixWorld(true);
+  cpos.setFromMatrixPosition(c.matrixWorld); cdir.set(0, 0, -1).transformDirection(c.matrixWorld);
+  return pick(cpos, cdir, raw);
+}
 function placeWorldForVR() {
   // A tabletop band: ~4 m wide, front edge about 0.6 m in front of you, at waist height.
   world.scale.setScalar(vrScale);
@@ -282,15 +365,18 @@ function vrInput(dt) {
     if (Math.abs(x) > 0.2) vrTurn -= x * dt * 1.2;
   }
   placeWorldForVR();
+  let hov = null;
+  for (const c of lasers) { const f = aim(c, true); if (f !== null) hov = f; }
+  showHover(hov);
 }
 async function enterVR() {
   const ses = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
   await renderer.xr.setSession(ses);
-  scene.fog = null; floor.visible = true; placeWorldForVR();
+  scene.fog = null; floor.visible = true; placeWorldForVR(); lasers.forEach(c => c.visible = true);
   vrBtn.textContent = 'Exit VR';
   ses.addEventListener('end', () => {
     world.scale.setScalar(1); world.rotation.y = 0; world.position.set(0, 0, 0);
-    scene.fog = new THREE.Fog('#05080d', 55, 120); floor.visible = false;
+    scene.fog = new THREE.Fog('#05080d', 55, 120); floor.visible = false; lasers.forEach(c => c.visible = false); showHover(null);
     vrBtn.textContent = 'Enter VR'; resize();
   });
 }

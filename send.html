@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AE Screen Sender</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@600&display=swap">
+<style>
+/* Run on the PC next to AetherSDR: share its window, read the code off this page into the Quest. */
+:root{
+  --bg:#05080d; --panel:#0b121b; --rule:#1a2635; --ink:#d9e4ef; --muted:#7f93a8;
+  --accent:#ffb21f; --live:#3fd18a; --bad:#ff6b5a;
+  --f-display:"Saira Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+  color-scheme:dark;
+}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--f-body)}
+main{max-width:640px;margin:0 auto;padding:32px 16px 48px}
+h1{font:700 26px/1.1 var(--f-display);letter-spacing:.04em;text-transform:uppercase;margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 28px}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:20px;margin-bottom:16px}
+.lbl{font:600 12px var(--f-display);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.code{font:600 64px/1 var(--f-mono);letter-spacing:.12em;color:var(--accent);margin:4px 0 10px}
+.link{font:13px var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+button{font:600 15px var(--f-body);color:#04140b;background:var(--live);border:0;border-radius:4px;padding:10px 16px;cursor:pointer}
+button.ghost{background:#121c28;color:var(--ink);border:1px solid var(--rule)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button[hidden]{display:none}
+video{display:block;width:100%;margin-top:14px;border:1px solid var(--rule);border-radius:4px;background:#000}
+video[hidden]{display:none}
+.status{font:13px var(--f-mono);margin-top:12px;color:var(--muted)}
+.status.ok{color:var(--live)} .status.bad{color:var(--bad)}
+ol{padding-left:20px;margin:0;color:var(--muted)} ol b{color:var(--ink)}
+</style>
+
+<main>
+  <h1>AE Screen Sender</h1>
+  <p class="sub">Streams one window from this PC (AetherSDR) into the 20 m Waterfall VR page on the Quest. View only.</p>
+
+  <div class="card">
+    <p class="lbl">Code for the Quest</p>
+    <div class="code" id="code">····</div>
+    <div class="link" id="link">connecting to the PeerJS matchmaking server…</div>
+  </div>
+
+  <div class="card">
+    <p class="lbl">Window</p>
+    <button id="share">Choose the AetherSDR window</button>
+    <button id="stop" class="ghost" hidden>Stop sharing</button>
+    <video id="preview" muted playsinline autoplay hidden></video>
+    <div class="status" id="status">Not sharing yet.</div>
+  </div>
+
+  <div class="card">
+    <p class="lbl">How to</p>
+    <ol>
+      <li>Press <b>Choose the AetherSDR window</b> and pick the AetherSDR window (the <b>Window</b> tab in the picker).</li>
+      <li>On the Quest, open the waterfall page, press <b>AE screen</b> and type the code above, or open the link.</li>
+      <li>Press <b>Enter VR</b>. The AetherSDR screen floats to your left. Point at it and hold <b>grip</b> to move it.</li>
+      <li>Keep this tab open: closing it ends the stream. Video goes straight across your network; only the
+        connection setup uses the public PeerJS server.</li>
+    </ol>
+  </div>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const status = (msg, cls) => { $('status').textContent = msg; $('status').className = 'status' + (cls ? ' ' + cls : ''); };
+let stream = null, peer = null;
+const viewers = new Map();                           // peerId -> active media call
+
+function start() {
+  const code = String(Math.floor(1000 + Math.random() * 9000));
+  peer = new Peer('wfvr-g0jkn-' + code);
+  peer.on('open', () => {
+    $('code').textContent = code;
+    const url = 'https://nigelfenton.github.io/waterfall-vr/?ae=' + code;
+    $('link').innerHTML = ''; const a = document.createElement('a'); a.href = url; a.textContent = url;
+    a.style.color = 'inherit'; $('link').append(a);
+  });
+  peer.on('error', err => {
+    if (err.type === 'unavailable-id') { peer.destroy(); start(); return; }   // code clash: pick another
+    $('link').textContent = 'PeerJS: ' + err.type + ' (' + err.message + ')';
+  });
+  peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
+  peer.on('connection', conn => {                     // the Quest page says hello; we call it with the window
+    conn.on('open', () => { viewers.set(conn.peer, null); if (stream) callViewer(conn.peer); updateCount(); });
+    conn.on('close', () => { const c = viewers.get(conn.peer); if (c) c.close(); viewers.delete(conn.peer); updateCount(); });
+  });
+}
+function callViewer(id) {
+  const old = viewers.get(id); if (old) old.close();
+  const call = peer.call(id, stream); viewers.set(id, call);
+  // AetherSDR is mostly text and fine lines: favour sharpness, and let it use LAN-sized bitrate.
+  const pc = call.peerConnection;
+  if (pc) pc.addEventListener('connectionstatechange', () => {
+    if (pc.connectionState !== 'connected') return;
+    for (const snd of pc.getSenders()) {
+      if (!snd.track || snd.track.kind !== 'video') continue;
+      const prm = snd.getParameters(); prm.degradationPreference = 'maintain-resolution';
+      if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+      prm.encodings[0].maxBitrate = 8000000; snd.setParameters(prm).catch(() => {});
+    }
+  });
+}
+function updateCount() {
+  const n = viewers.size;
+  if (!stream) status(n ? n + ' viewer waiting: choose a window.' : 'Not sharing yet.');
+  else status(n ? 'Sharing to ' + n + ' viewer' + (n > 1 ? 's' : '') + '.' : 'Sharing. Waiting for the Quest to connect…', n ? 'ok' : '');
+}
+
+$('share').addEventListener('click', async () => {
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 }, width: { ideal: 1920 } }, audio: false });
+  } catch (e) { status('Window picker cancelled or blocked: ' + e.message, 'bad'); return; }
+  stream.getVideoTracks()[0].contentHint = 'detail';
+  $('preview').srcObject = stream; $('preview').hidden = false;
+  $('share').hidden = true; $('stop').hidden = false;
+  stream.getVideoTracks()[0].addEventListener('ended', stopShare);
+  for (const id of viewers.keys()) callViewer(id);
+  updateCount();
+});
+function stopShare() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; for (const c of viewers.values()) if (c) c.close();
+  for (const id of viewers.keys()) viewers.set(id, null);
+  $('preview').hidden = true; $('share').hidden = false; $('stop').hidden = true; updateCount();
+}
+$('stop').addEventListener('click', stopShare);
+start();
+})();
+</script>
